@@ -1,0 +1,230 @@
+#!/bin/sh
+set -e  # Exit on any error
+
+# ==============================================================================
+# Setup script to install Citrix Workspace App via for Distrobox & Debian 12
+# ==============================================================================
+# This script sets up Citrix Workspace App in a Distrobox container based on
+# Debian 12. It requires the .deb packages to be present in the current directory.
+#
+# Usage: ./setup-distrobox-citrix
+#
+# Requirements:
+# - Distrobox installed on host
+# - Citrix .deb packages in current directory
+# - Root/sudo access for package installation
+#
+# ==============================================================================
+
+# Configuration - Update these variables for new versions
+CITRIX_VERSION="26.01.0.150"
+ICACLIENT_PKG="icaclient_${CITRIX_VERSION}_amd64.deb"
+CTXUSB_PKG="ctxusb_${CITRIX_VERSION}_amd64.deb"
+CONTAINER_NAME="citrix-${CITRIX_VERSION}"
+
+# Colors for output
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+NC='\033[0m' # No Color
+
+# Helper functions
+print_info() {
+    printf "${BLUE}[INFO]${NC} %s\n" "$1"
+}
+
+print_success() {
+    printf "${GREEN}[SUCCESS]${NC} %s\n" "$1"
+}
+
+print_warning() {
+    printf "${YELLOW}[WARNING]${NC} %s\n" "$1"
+}
+
+print_error() {
+    printf "${RED}[ERROR]${NC} %s\n" "$1"
+}
+
+# Check for distrobox
+if ! command -v distrobox > /dev/null 2>&1; then
+    print_error "Distrobox is not installed. Please install it first."
+    exit 1
+fi
+print_success "Distrobox is installed."
+
+# Step 1: Check for required packages
+print_info "Step 1/6: Checking for required Citrix packages (version ${CITRIX_VERSION})..."
+
+DOWNLOAD_URL="https://www.citrix.com/downloads/workspace-app/linux/workspace-app-for-linux-latest.html"
+if [ ! -f "${ICACLIENT_PKG}" ]; then
+    print_error "Missing: ${ICACLIENT_PKG}"
+    print_info "Download from: ${DOWNLOAD_URL}"
+    print_info "Download 'Debian Packages > Full Package (Self-Service Support) - Citrix Workspace app for Linux (x86_64)'"
+    xdg-open "${DOWNLOAD_URL}"
+    exit 1
+fi
+
+if [ ! -f "${CTXUSB_PKG}" ]; then
+    print_error "Missing: ${CTXUSB_PKG}"
+    print_info "Download from: ${DOWNLOAD_URL}"
+    print_info "Download 'Debian Packages > USB Support Package (x86_64)'"
+    xdg-open "${DOWNLOAD_URL}"
+    exit 1
+fi
+
+print_success "Citrix packages found."
+ls -lh "${ICACLIENT_PKG}" "${CTXUSB_PKG}"
+
+# Step 2: Create container
+print_info "Step 2/6: Creating Distrobox container '${CONTAINER_NAME}'..."
+if distrobox-create --name ${CONTAINER_NAME} --image "debian:12" --yes; then
+    print_success "Container created successfully."
+else
+    print_warning "Container might already exist. Continuing..."
+fi
+
+# Step 3: Install dependencies
+print_info "Step 3/6: Installing dependencies in container..."
+distrobox-enter ${CONTAINER_NAME} -- bash -c "
+sudo apt-get update && \
+sudo apt-get install -y \
+  libasound2 \
+  libcairo2 \
+  libdbus-glib-1-2 \
+  libfontconfig1 \
+  libfreetype6 \
+  libgdk-pixbuf2.0-0 \
+  libgtk-3-0 \
+  libgtk2.0-0 \
+  libice6 \
+  libidn12 \
+  libnspr4 \
+  libnss3 \
+  libpango-1.0-0 \
+  libpangocairo-1.0-0 \
+  libpcsclite1 \
+  libpulse0 \
+  libsm6 \
+  libspeexdsp1 \
+  libva2 \
+  libx11-xcb1 \
+  libxcb-randr0 \
+  libxcomposite1 \
+  libxdamage1 \
+  libxfixes3 \
+  libxinerama1 \
+  libxkbcommon-x11-0 \
+  libxmu6 \
+  libxpm4 \
+  libxrandr2 \
+  libxrender1 \
+  libxss1 \
+  libxtst6 \
+  net-tools \
+  udev"
+print_success "Dependencies installed."
+
+# Step 4: Install Citrix packages directly from current directory
+print_info "Step 4/6: Installing Citrix packages..."
+distrobox-enter ${CONTAINER_NAME} -- bash -c "DEBIAN_FRONTEND=noninteractive sudo apt-get install -y ./${ICACLIENT_PKG} ./${CTXUSB_PKG}" || \
+distrobox-enter ${CONTAINER_NAME} -- bash -c "sudo apt --fix-broken install -y"
+print_success "Citrix packages installed."
+
+# Step 5: Wrap wfica to source environment file
+print_info "Step 5/7: Wrapping wfica to source environment file..."
+distrobox-enter ${CONTAINER_NAME} -- bash -c "
+    WFICA_PATH='/opt/Citrix/ICAClient/wfica'
+    WFICA_ORIG_PATH='/opt/Citrix/ICAClient/wfica.orig'
+
+    # Move original wfica to wfica.orig
+    if [ -f \"\$WFICA_PATH\" ] && [ ! -f \"\$WFICA_ORIG_PATH\" ]; then
+        sudo mv \"\$WFICA_PATH\" \"\$WFICA_ORIG_PATH\"
+        echo 'Moved wfica to wfica.orig'
+    fi
+
+    # Create wrapper script
+    sudo tee \"\$WFICA_PATH\" > /dev/null << 'WRAPPER'
+#!/bin/sh
+# wfica wrapper - sources environment file before executing original binary
+if [ -f \"\$HOME/.ICAClient/wfica.env\" ]; then
+    . \"\$HOME/.ICAClient/wfica.env\"
+fi
+exec /opt/Citrix/ICAClient/wfica.orig \"\$@\"
+WRAPPER
+    sudo chmod +x \"\$WFICA_PATH\"
+    echo 'Created wfica wrapper script'
+"
+print_success "wfica wrapper configured."
+
+# Step 6: Accept EULA and create scripts
+print_info "Step 6/7: Accepting EULA and creating scripts..."
+# Create EULA acceptance file and empty wfica.env in the user's home directory
+distrobox-enter ${CONTAINER_NAME} -- bash -c "mkdir -p ~/.ICAClient && touch ~/.ICAClient/.eula_accepted && touch ~/.ICAClient/wfica.env"
+
+# Create launch script
+cat > citrix-workspace << EOF
+#!/bin/bash
+# Launch Citrix Workspace App
+distrobox-enter ${CONTAINER_NAME} -- bash -c "export ICAROOT=/opt/Citrix/ICAClient && /opt/Citrix/ICAClient/selfservice"
+EOF
+chmod +x citrix-workspace
+print_success "Launch script created."
+
+# Step 7: Create and install .desktop file
+print_info "Step 7/7: Creating and installing .desktop file..."
+
+# Copy icon from container to host
+ICON_DIR="${HOME}/.local/share/icons"
+mkdir -p "${ICON_DIR}"
+ICON_PATH="${ICON_DIR}/citrix-workspace-${CITRIX_VERSION}.png"
+# Extract icon from container using distrobox-enter and stdout
+distrobox-enter ${CONTAINER_NAME} -- bash -c "cat /opt/Citrix/ICAClient/icons/000_Receiver_64.png" > "${ICON_PATH}"
+
+# Create .desktop file in current directory
+DESKTOP_FILE="citrix-${CITRIX_VERSION}.desktop"
+cat > "./${DESKTOP_FILE}" << EOF
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=Citrix Workspace App ${CITRIX_VERSION}
+Comment=Citrix Workspace App in Distrobox container
+Exec=distrobox-enter ${CONTAINER_NAME} -- bash -c "ICAROOT=/opt/Citrix/ICAClient /opt/Citrix/ICAClient/selfservice"
+Icon=${ICON_PATH}
+Terminal=false
+Categories=Network;
+StartupWMClass=Citrix SelfService
+EOF
+
+
+# Install using desktop-file-install if available
+if command -v desktop-file-install > /dev/null 2>&1; then
+    desktop-file-install --dir="${HOME}/.local/share/applications" --mode=644 "./${DESKTOP_FILE}"
+    print_success ".desktop file installed and validated"
+
+    # Update desktop database
+    if command -v update-desktop-database > /dev/null 2>&1; then
+        update-desktop-database "${HOME}/.local/share/applications"
+        print_success "Desktop database updated"
+    fi
+else
+    print_warning "desktop-file-install not found, using manual copy"
+    cp "./${DESKTOP_FILE}" "${HOME}/.local/share/applications/${DESKTOP_FILE}"
+    chmod 644 "${HOME}/.local/share/applications/${DESKTOP_FILE}"
+fi
+
+# Summary
+print_info "=================================================================="
+print_info "Citrix Workspace on Distrobox & Debian 12 Setup Complete!"
+print_info "=================================================================="
+print_info ""
+print_info "Container: ${CONTAINER_NAME}"
+print_info "Citrix Version: ${CITRIX_VERSION}"
+print_info ""
+print_info "Next steps:"
+print_info "1. (Optional) Create ~/.ICAClient/wfica.env with environment variables"
+print_info "2. Launch Citrix: ./citrix-workspace"
+print_info "3. Launch from application menu: Citrix Workspace App ${CITRIX_VERSION}"
+print_info "4. Configure your StoreFront URL in the Citrix GUI"
+print_info ""
+print_info "=================================================================="
