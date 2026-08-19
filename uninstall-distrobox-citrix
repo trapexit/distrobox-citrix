@@ -11,13 +11,10 @@ set -e  # Exit on any error
 #
 # ==============================================================================
 
-# Configuration - Must match setup-distrobox-citrix
-CITRIX_VERSION="26.01.0.150"
-CONTAINER_NAME="citrix-${CITRIX_VERSION}"
-DESKTOP_FILE="citrix-${CITRIX_VERSION}.desktop"
-ICON_PATH="${HOME}/.local/share/icons/citrix-workspace-${CITRIX_VERSION}.png"
-DESKTOP_FILE_PATH="${HOME}/.local/share/applications/${DESKTOP_FILE}"
-LAUNCH_SCRIPT="citrix-workspace"
+# Configuration
+PINNED_CITRIX_VERSION="26.04.10.1"
+VERSION_FILE=".distrobox-citrix-version"
+CITRIX_VERSION="$PINNED_CITRIX_VERSION"
 
 # Colors for output
 RED='\033[0;31m'
@@ -43,6 +40,25 @@ print_error() {
     printf "${RED}[ERROR]${NC} %s\n" "$1"
 }
 
+if [ -f "$VERSION_FILE" ]; then
+    CITRIX_VERSION=""
+    IFS= read -r CITRIX_VERSION < "$VERSION_FILE" || true
+fi
+
+case "$CITRIX_VERSION" in
+    ""|*[!A-Za-z0-9._-]*)
+        print_error "Invalid Citrix version in ${VERSION_FILE}: ${CITRIX_VERSION}"
+        exit 1
+        ;;
+esac
+
+CONTAINER_NAME="citrix-${CITRIX_VERSION}"
+DESKTOP_FILE="citrix-${CITRIX_VERSION}.desktop"
+ICON_PATH="${HOME}/.local/share/icons/citrix-workspace-${CITRIX_VERSION}.png"
+DESKTOP_FILE_PATH="${HOME}/.local/share/applications/${DESKTOP_FILE}"
+LOCAL_DESKTOP_FILE="./${DESKTOP_FILE}"
+LAUNCH_SCRIPT="citrix-workspace"
+
 # Check for distrobox
 if ! command -v distrobox > /dev/null 2>&1; then
     print_error "Distrobox is not installed. Cannot proceed with uninstall."
@@ -51,20 +67,27 @@ fi
 print_success "Distrobox is installed."
 
 # Step 1: Remove container
-print_info "Step 1/4: Removing Distrobox container '${CONTAINER_NAME}'..."
-if distrobox rm -f ${CONTAINER_NAME}; then
+print_info "Step 1/5: Removing Distrobox container '${CONTAINER_NAME}'..."
+if distrobox rm -f "$CONTAINER_NAME"; then
     print_success "Container removed successfully."
 else
     print_warning "Container might not exist or could not be removed. Continuing..."
 fi
 
 # Step 2: Remove desktop file
-print_info "Step 2/4: Removing desktop file..."
-if [ -f "${DESKTOP_FILE_PATH}" ]; then
-    rm "${DESKTOP_FILE_PATH}"
-    print_success "Desktop file removed."
+print_info "Step 2/5: Removing desktop files..."
+if [ -f "$DESKTOP_FILE_PATH" ]; then
+    rm "$DESKTOP_FILE_PATH"
+    print_success "Installed desktop file removed."
 else
     print_warning "Desktop file not found: ${DESKTOP_FILE_PATH}"
+fi
+
+if [ -f "$LOCAL_DESKTOP_FILE" ]; then
+    rm "$LOCAL_DESKTOP_FILE"
+    print_success "Local desktop file removed."
+else
+    print_warning "Desktop file not found: ${LOCAL_DESKTOP_FILE}"
 fi
 
 # Update desktop database
@@ -74,7 +97,7 @@ if command -v update-desktop-database > /dev/null 2>&1; then
 fi
 
 # Step 3: Remove icon
-print_info "Step 3/4: Removing icon..."
+print_info "Step 3/5: Removing icon..."
 if [ -f "${ICON_PATH}" ]; then
     rm "${ICON_PATH}"
     print_success "Icon removed."
@@ -83,12 +106,21 @@ else
 fi
 
 # Step 4: Remove launch script
-print_info "Step 4/4: Removing launch script..."
+print_info "Step 4/5: Removing launch script..."
 if [ -f "${LAUNCH_SCRIPT}" ]; then
     rm "${LAUNCH_SCRIPT}"
     print_success "Launch script removed."
 else
     print_warning "Launch script not found: ${LAUNCH_SCRIPT}"
+fi
+
+# Step 5: Remove installed-version state
+print_info "Step 5/5: Removing installed-version state..."
+if [ -f "$VERSION_FILE" ]; then
+    rm "$VERSION_FILE"
+    print_success "Installed-version state removed."
+else
+    print_warning "Version file not found: ${VERSION_FILE}"
 fi
 
 # Summary
@@ -101,8 +133,10 @@ print_info "Citrix Version: ${CITRIX_VERSION}"
 print_info ""
 print_info "The following files were removed:"
 print_info " - ${DESKTOP_FILE_PATH}"
+print_info " - ${LOCAL_DESKTOP_FILE}"
 print_info " - ${ICON_PATH}"
 print_info " - ${LAUNCH_SCRIPT}"
+print_info " - ${VERSION_FILE}"
 print_info ""
 print_info "Note: The Distrobox container has been deleted along with"
 print_info "all installed Citrix packages and dependencies inside it."

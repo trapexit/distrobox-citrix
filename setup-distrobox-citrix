@@ -5,22 +5,30 @@ set -e  # Exit on any error
 # Setup script to install Citrix Workspace App via for Distrobox & Debian 12
 # ==============================================================================
 # This script sets up Citrix Workspace App in a Distrobox container based on
-# Debian 12. It requires the .deb packages to be present in the current directory.
+# Debian 12. Debian x86_64 packages are resolved from Citrix's latest download
+# page. The pinned version is used when the page cannot be reached.
 #
 # Usage: ./setup-distrobox-citrix
 #
 # Requirements:
 # - Distrobox installed on host
-# - Citrix .deb packages in current directory
+# - curl or wget, unless the pinned .deb packages are in the current directory
 # - Root/sudo access for package installation
 #
 # ==============================================================================
 
-# Configuration - Update these variables for new versions
-CITRIX_VERSION="26.01.0.150"
-ICACLIENT_PKG="icaclient_${CITRIX_VERSION}_amd64.deb"
-CTXUSB_PKG="ctxusb_${CITRIX_VERSION}_amd64.deb"
-CONTAINER_NAME="citrix-${CITRIX_VERSION}"
+# Configuration
+CITRIX_DOWNLOAD_PAGE="https://www.citrix.com/downloads/workspace-app/linux/workspace-app-for-linux-latest.html"
+PINNED_CITRIX_VERSION="26.04.10.1"
+CITRIX_VERSION="$PINNED_CITRIX_VERSION"
+ICACLIENT_PKG="icaclient-gcc-8_${CITRIX_VERSION}_amd64.deb"
+CTXUSB_PKG="ctxusb-gcc-8_${CITRIX_VERSION}_amd64.deb"
+VERSION_FILE=".distrobox-citrix-version"
+ICACLIENT_URL=""
+CTXUSB_URL=""
+ICACLIENT_SHA256=""
+CTXUSB_SHA256=""
+DOWNLOAD_TOOL=""
 
 # Colors for output
 RED='\033[0;31m'
@@ -46,6 +54,255 @@ print_error() {
     printf "${RED}[ERROR]${NC} %s\n" "$1"
 }
 
+require_download_tool() {
+    if command -v curl > /dev/null 2>&1; then
+        DOWNLOAD_TOOL="curl"
+        return 0
+    fi
+
+    if command -v wget > /dev/null 2>&1; then
+        DOWNLOAD_TOOL="wget"
+        return 0
+    fi
+
+    return 1
+}
+
+fetch_url_to_file() {
+    url=$1
+    destination=$2
+
+    case "$DOWNLOAD_TOOL" in
+        curl)
+            curl -fL --retry 3 -o "$destination" "$url"
+            ;;
+        wget)
+            wget -O "$destination" "$url"
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
+normalize_download_url() {
+    case "$1" in
+        //*)
+            printf 'https:%s\n' "$1"
+            ;;
+        http://*|https://*)
+            printf '%s\n' "$1"
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
+download_name_from_url() {
+    url_without_query=${1%%\?*}
+    file_name=${url_without_query##*/}
+
+    if [ -z "$file_name" ]; then
+        return 1
+    fi
+
+    printf '%s\n' "$file_name"
+}
+
+version_from_icaclient_package() {
+    case "$1" in
+        icaclient*_amd64.deb)
+            version=${1%_amd64.deb}
+            version=${version##*_}
+            if [ -n "$version" ]; then
+                printf '%s\n' "$version"
+                return 0
+            fi
+            ;;
+    esac
+
+    return 1
+}
+
+extract_deb_component() {
+    html_file=$1
+    title=$2
+
+    awk -v expected_title="$title" '
+        function finish_component() {
+            if (matched_title && download_url != "") {
+                printf "%s\t%s\n", download_url, checksum
+                found = 1
+                exit 0
+            }
+        }
+
+        /<div class="downloadComponent section">/ {
+            finish_component()
+            matched_title = 0
+            download_url = ""
+            checksum = ""
+        }
+
+        {
+            line = $0
+            sub(/^[[:space:]]*/, "", line)
+            sub(/[[:space:]]*$/, "", line)
+
+            if (line == "<h4>" expected_title "</h4>") {
+                matched_title = 1
+            }
+
+            if (matched_title && download_url == "" &&
+                    match($0, /rel="[^"]*_amd64\.deb[^"]*"/)) {
+                download_url = substr($0, RSTART + 5, RLENGTH - 6)
+            }
+
+            if (matched_title && checksum == "" &&
+                    match($0, /SHA-256[[:space:]]*-[[:space:]]*[0-9A-Fa-f]+/)) {
+                checksum = substr($0, RSTART, RLENGTH)
+                sub(/^SHA-256[[:space:]]*-[[:space:]]*/, "", checksum)
+            }
+        }
+
+        END {
+            if (!found) {
+                if (matched_title && download_url != "") {
+                    printf "%s\t%s\n", download_url, checksum
+                    found = 1
+                }
+
+                if (!found) {
+                    exit 1
+                }
+            }
+        }
+    ' "$html_file"
+}
+
+sha256_matches() {
+    file=$1
+    expected_sha256=$2
+
+    if [ -z "$expected_sha256" ]; then
+        return 0
+    fi
+
+    if ! command -v sha256sum > /dev/null 2>&1; then
+        print_error "sha256sum is required to verify ${file}."
+        return 1
+    fi
+
+    if ! checksum_output=$(sha256sum "$file"); then
+        print_error "Could not calculate the SHA-256 checksum for ${file}."
+        return 1
+    fi
+    actual_sha256=${checksum_output%% *}
+
+    [ "$actual_sha256" = "$expected_sha256" ]
+}
+
+ensure_package() {
+    label=$1
+    package=$2
+    url=$3
+    expected_sha256=$4
+    part_file="${package}.part"
+
+    if [ -f "$package" ] && sha256_matches "$package" "$expected_sha256"; then
+        print_success "${label} is ready: ${package}"
+        return 0
+    fi
+
+    if [ -f "$package" ]; then
+        print_warning "Checksum verification failed for ${package}."
+    else
+        print_info "${label} is missing: ${package}"
+    fi
+
+    if [ -z "$url" ]; then
+        print_error "Cannot prepare ${package} automatically."
+        print_info "Download page: ${CITRIX_DOWNLOAD_PAGE}"
+        print_info "Required file: ${package}"
+        return 1
+    fi
+
+    if [ -z "$DOWNLOAD_TOOL" ] && ! require_download_tool; then
+        print_error "curl or wget is required to download ${package}."
+        print_info "Download page: ${CITRIX_DOWNLOAD_PAGE}"
+        print_info "Required file: ${package}"
+        return 1
+    fi
+
+    rm -f "$part_file"
+    print_info "Downloading ${label}: ${package}"
+    if ! fetch_url_to_file "$url" "$part_file"; then
+        rm -f "$part_file"
+        print_error "Failed to download ${package}."
+        return 1
+    fi
+
+    if ! sha256_matches "$part_file" "$expected_sha256"; then
+        rm -f "$part_file"
+        print_error "Checksum verification failed for downloaded ${package}."
+        return 1
+    fi
+
+    mv "$part_file" "$package"
+    print_success "${label} downloaded and verified: ${package}"
+}
+
+resolve_latest_packages() {
+    full_package_title="Full Package (Self-Service Support) - Citrix Workspace app for Linux (x86_64)"
+    usb_package_title="USB Support Package (x86_64)"
+
+    if ! require_download_tool; then
+        print_warning "curl or wget is unavailable; using pinned Citrix package names."
+        return 0
+    fi
+
+    if ! html_file=$(mktemp); then
+        print_warning "Could not create a temporary file; using pinned Citrix package names."
+        return 0
+    fi
+
+    if ! fetch_url_to_file "$CITRIX_DOWNLOAD_PAGE" "$html_file"; then
+        rm -f "$html_file"
+        print_warning "Could not fetch the Citrix download page; using pinned package names."
+        return 0
+    fi
+
+    if ! full_component=$(extract_deb_component "$html_file" "$full_package_title") ||
+            ! usb_component=$(extract_deb_component "$html_file" "$usb_package_title"); then
+        rm -f "$html_file"
+        print_warning "Could not parse the Citrix Debian x86_64 packages; using pinned package names."
+        return 0
+    fi
+    rm -f "$html_file"
+
+    tab=$(printf '\t')
+    full_raw_url=${full_component%%"$tab"*}
+    ICACLIENT_SHA256=${full_component#*"$tab"}
+    usb_raw_url=${usb_component%%"$tab"*}
+    CTXUSB_SHA256=${usb_component#*"$tab"}
+
+    if ! ICACLIENT_URL=$(normalize_download_url "$full_raw_url") ||
+            ! CTXUSB_URL=$(normalize_download_url "$usb_raw_url") ||
+            ! ICACLIENT_PKG=$(download_name_from_url "$ICACLIENT_URL") ||
+            ! CTXUSB_PKG=$(download_name_from_url "$CTXUSB_URL") ||
+            ! CITRIX_VERSION=$(version_from_icaclient_package "$ICACLIENT_PKG"); then
+        CITRIX_VERSION="$PINNED_CITRIX_VERSION"
+        ICACLIENT_PKG="icaclient-gcc-8_${CITRIX_VERSION}_amd64.deb"
+        CTXUSB_PKG="ctxusb-gcc-8_${CITRIX_VERSION}_amd64.deb"
+        ICACLIENT_URL=""
+        CTXUSB_URL=""
+        ICACLIENT_SHA256=""
+        CTXUSB_SHA256=""
+        print_warning "Citrix package metadata was invalid; using pinned package names."
+    fi
+}
+
 # Check for distrobox
 if ! command -v distrobox > /dev/null 2>&1; then
     print_error "Distrobox is not installed. Please install it first."
@@ -53,40 +310,31 @@ if ! command -v distrobox > /dev/null 2>&1; then
 fi
 print_success "Distrobox is installed."
 
-# Step 1: Check for required packages
-print_info "Step 1/6: Checking for required Citrix packages (version ${CITRIX_VERSION})..."
+# Step 1: Resolve and prepare packages
+print_info "Step 1/7: Resolving latest Citrix Debian packages..."
+resolve_latest_packages
+CONTAINER_NAME="citrix-${CITRIX_VERSION}"
 
-DOWNLOAD_URL="https://www.citrix.com/downloads/workspace-app/linux/workspace-app-for-linux-latest.html"
-if [ ! -f "${ICACLIENT_PKG}" ]; then
-    print_error "Missing: ${ICACLIENT_PKG}"
-    print_info "Download from: ${DOWNLOAD_URL}"
-    print_info "Download 'Debian Packages > Full Package (Self-Service Support) - Citrix Workspace app for Linux (x86_64)'"
-    xdg-open "${DOWNLOAD_URL}"
-    exit 1
-fi
+print_info "Citrix Version: ${CITRIX_VERSION}"
+print_info "Workspace package: ${ICACLIENT_PKG}"
+print_info "USB support package: ${CTXUSB_PKG}"
 
-if [ ! -f "${CTXUSB_PKG}" ]; then
-    print_error "Missing: ${CTXUSB_PKG}"
-    print_info "Download from: ${DOWNLOAD_URL}"
-    print_info "Download 'Debian Packages > USB Support Package (x86_64)'"
-    xdg-open "${DOWNLOAD_URL}"
-    exit 1
-fi
+ensure_package "Citrix Workspace full package" "$ICACLIENT_PKG" "$ICACLIENT_URL" "$ICACLIENT_SHA256"
+ensure_package "Citrix USB support package" "$CTXUSB_PKG" "$CTXUSB_URL" "$CTXUSB_SHA256"
 
-print_success "Citrix packages found."
-ls -lh "${ICACLIENT_PKG}" "${CTXUSB_PKG}"
+ls -lh "$ICACLIENT_PKG" "$CTXUSB_PKG"
 
 # Step 2: Create container
-print_info "Step 2/6: Creating Distrobox container '${CONTAINER_NAME}'..."
-if distrobox-create --name ${CONTAINER_NAME} --image "debian:12" --yes; then
+print_info "Step 2/7: Creating Distrobox container '${CONTAINER_NAME}'..."
+if distrobox-create --name "$CONTAINER_NAME" --image "debian:12" --yes; then
     print_success "Container created successfully."
 else
     print_warning "Container might already exist. Continuing..."
 fi
 
 # Step 3: Install dependencies
-print_info "Step 3/6: Installing dependencies in container..."
-distrobox-enter ${CONTAINER_NAME} -- bash -c "
+print_info "Step 3/7: Installing dependencies in container..."
+distrobox-enter "$CONTAINER_NAME" -- bash -c "
 sudo apt-get update && \
 sudo apt-get install -y \
   libasound2 \
@@ -126,14 +374,14 @@ sudo apt-get install -y \
 print_success "Dependencies installed."
 
 # Step 4: Install Citrix packages directly from current directory
-print_info "Step 4/6: Installing Citrix packages..."
-distrobox-enter ${CONTAINER_NAME} -- bash -c "DEBIAN_FRONTEND=noninteractive sudo apt-get install -y ./${ICACLIENT_PKG} ./${CTXUSB_PKG}" || \
-distrobox-enter ${CONTAINER_NAME} -- bash -c "sudo apt --fix-broken install -y"
+print_info "Step 4/7: Installing Citrix packages..."
+distrobox-enter "$CONTAINER_NAME" -- bash -c "DEBIAN_FRONTEND=noninteractive sudo apt-get install -y \"./${ICACLIENT_PKG}\" \"./${CTXUSB_PKG}\"" || \
+distrobox-enter "$CONTAINER_NAME" -- bash -c "sudo apt --fix-broken install -y"
 print_success "Citrix packages installed."
 
 # Step 5: Wrap wfica to source environment file
 print_info "Step 5/7: Wrapping wfica to source environment file..."
-distrobox-enter ${CONTAINER_NAME} -- bash -c "
+distrobox-enter "$CONTAINER_NAME" -- bash -c "
     WFICA_PATH='/opt/Citrix/ICAClient/wfica'
     WFICA_ORIG_PATH='/opt/Citrix/ICAClient/wfica.orig'
 
@@ -160,15 +408,16 @@ print_success "wfica wrapper configured."
 # Step 6: Accept EULA and create scripts
 print_info "Step 6/7: Accepting EULA and creating scripts..."
 # Create EULA acceptance file and empty wfica.env in the user's home directory
-distrobox-enter ${CONTAINER_NAME} -- bash -c "mkdir -p ~/.ICAClient && touch ~/.ICAClient/.eula_accepted && touch ~/.ICAClient/wfica.env"
+distrobox-enter "$CONTAINER_NAME" -- bash -c "mkdir -p ~/.ICAClient && touch ~/.ICAClient/.eula_accepted && touch ~/.ICAClient/wfica.env"
 
 # Create launch script
 cat > citrix-workspace << EOF
 #!/bin/bash
 # Launch Citrix Workspace App
-distrobox-enter ${CONTAINER_NAME} -- bash -c "export ICAROOT=/opt/Citrix/ICAClient && /opt/Citrix/ICAClient/selfservice"
+distrobox-enter "${CONTAINER_NAME}" -- bash -c "export ICAROOT=/opt/Citrix/ICAClient && /opt/Citrix/ICAClient/selfservice"
 EOF
 chmod +x citrix-workspace
+printf '%s\n' "$CITRIX_VERSION" > "$VERSION_FILE"
 print_success "Launch script created."
 
 # Step 7: Create and install .desktop file
@@ -179,7 +428,7 @@ ICON_DIR="${HOME}/.local/share/icons"
 mkdir -p "${ICON_DIR}"
 ICON_PATH="${ICON_DIR}/citrix-workspace-${CITRIX_VERSION}.png"
 # Extract icon from container using distrobox-enter and stdout
-distrobox-enter ${CONTAINER_NAME} -- bash -c "cat /opt/Citrix/ICAClient/icons/000_Receiver_64.png" > "${ICON_PATH}"
+distrobox-enter "$CONTAINER_NAME" -- bash -c "cat /opt/Citrix/ICAClient/icons/000_Receiver_64.png" > "${ICON_PATH}"
 
 # Create .desktop file in current directory
 DESKTOP_FILE="citrix-${CITRIX_VERSION}.desktop"

@@ -34,7 +34,7 @@ seamlessly with the host system:
 
 The setup creates a Distrobox container with:
 - **Debian 12** base image
-- **Citrix Workspace App 26.01.0.150**
+- **Citrix Workspace App 26.04.10.1** (Citrix page label `2604.10`)
 - **All required dependencies** (X11, GTK, audio, smart card support)
 - **Desktop integration** via `.desktop` file
 
@@ -45,16 +45,19 @@ The setup creates a Distrobox container with:
 
 - Linux distribution with Distrobox support
 - Distrobox installed
+- Either `curl` or `wget` so setup can resolve and download the latest packages
 
 
 ### Citrix Packages
 
-You need to manually download the Citrix `.deb` packages:
-1. Visit https://www.citrix.com/downloads/workspace-app/linux/workspace-app-for-linux-latest.html
-2. Download the **Debian/Ubuntu 64-bit x86_64** packages
-3. Save both files to the current directory:
-   - `icaclient_26.01.0.150_amd64.deb`
-   - `ctxusb_26.01.0.150_amd64.deb`
+Setup automatically resolves Citrix's latest Linux download page and downloads
+missing Debian x86_64 packages. The current resolved filenames are:
+
+- `icaclient-gcc-8_26.04.10.1_amd64.deb`
+- `ctxusb-gcc-8_26.04.10.1_amd64.deb`
+
+If neither `curl` nor `wget` is installed, both files must already be present in
+the current directory.
 
 
 ## Installation
@@ -71,8 +74,8 @@ cd distrobox-citrix
 
 The `setup-distrobox-citrix` script performs 7 steps:
 
-1. **Validates Packages**: Checks that both `.deb` files exist and opens the download page if missing
-2. **Creates Container**: Creates a Distrobox container named `citrix-26.01.0.150` based on Debian 12
+1. **Resolves Packages**: Reads Citrix's latest Linux page, downloads missing Debian x86_64 packages, and verifies SHA-256 checksums when Citrix provides them
+2. **Creates Container**: Creates a Distrobox container named `citrix-26.04.10.1` based on Debian 12
 3. **Installs Dependencies**: Installs all required system libraries (GTK, audio, smart card, X11 support)
 4. **Installs Citrix**: Installs the Citrix Workspace App packages
 5. **Wraps wfica**: Creates a wrapper script that sources environment variables from `~/.ICAClient/wfica.env`
@@ -85,7 +88,7 @@ The `setup-distrobox-citrix` script performs 7 steps:
 ### Launch Methods
 
 **1. Application Menu (Recommended)** After installation, look for
-"Citrix Workspace App 26.01.0.150" in your applications menu.
+"Citrix Workspace App 26.04.10.1" in your applications menu.
 
 **2. Command Line Script**
 ```bash
@@ -94,7 +97,7 @@ The `setup-distrobox-citrix` script performs 7 steps:
 
 **3. Direct Command**
 ```bash
-distrobox-enter citrix-26.01.0.150 -- /opt/Citrix/ICAClient/selfservice
+distrobox-enter citrix-26.04.10.1 -- /opt/Citrix/ICAClient/selfservice
 ```
 
 ### First Launch
@@ -106,38 +109,34 @@ distrobox-enter citrix-26.01.0.150 -- /opt/Citrix/ICAClient/selfservice
 
 ## Files Created
 
-### Scripts
+### Scripts and State
 - `setup-distrobox-citrix` - Main setup script
 - `uninstall-distrobox-citrix` - Uninstall everything installed by
   setup script
 - `citrix-workspace` - Launch script for Citrix SelfService
+- `.distrobox-citrix-version` - Installed version used by uninstall
 
 
 ### Desktop File
-- `~/.local/share/applications/citrix-26.01.0.150.desktop` - Menu integration
+- `citrix-26.04.10.1.desktop` - Local generated desktop file
+- `~/.local/share/applications/citrix-26.04.10.1.desktop` - Menu integration
 
 ### Container
-- `citrix-26.01.0.150` - Distrobox container with Citrix installed
+- `citrix-26.04.10.1` - Distrobox container with Citrix installed
 
 
-## Configuration Variables
+## Package Resolution
 
-The script uses variables at the top for easy updates:
+The script fetches Citrix's latest Linux download page at runtime and selects
+the exact Debian x86_64 full and USB support package entries. It downloads
+missing packages through `curl` or `wget` and verifies checksums published on
+the page.
 
-```bash
-CITRIX_VERSION="26.01.0.150"
-ICACLIENT_PKG="icaclient_${CITRIX_VERSION}_amd64.deb"
-CTXUSB_PKG="ctxusb_${CITRIX_VERSION}_amd64.deb"
-CONTAINER_NAME="citrix-${CITRIX_VERSION}"
-```
-
-To update to a new Citrix version:
-1. Update `CITRIX_VERSION`
-2. Download new `.deb` packages
-3. Re-run the setup script
+If the page cannot be fetched or parsed, setup falls back to the pinned
+`26.04.10.1` filenames and requires those files to be available locally.
 
 
-### Environment Variables for wfica Sessions
+## Environment Variables for wfica Sessions
 
 The setup script configures `wfica` to source environment variables from
 `~/.ICAClient/wfica.env` before launching the actual Citrix session. This
@@ -161,10 +160,16 @@ export TZ=America/New_York
 ## Maintenance
 
 ### Updating Citrix
-1. Download new `.deb` packages
-2. Update `CITRIX_VERSION` in the script
-3. Remove old container: `distrobox rm citrix-26.01.0.150`
-4. Re-run setup script
+
+Re-run setup:
+
+```bash
+./setup-distrobox-citrix
+```
+
+The script fetches Citrix's latest Linux page and downloads newer Debian x86_64
+packages when Citrix publishes them. If the page cannot be reached, it falls
+back to the pinned `26.04.10.1` filenames and requires those files locally.
 
 
 ### Removing Everything
