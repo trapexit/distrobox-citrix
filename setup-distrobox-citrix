@@ -24,6 +24,17 @@ CITRIX_VERSION="$PINNED_CITRIX_VERSION"
 ICACLIENT_PKG="icaclient-gcc-8_${CITRIX_VERSION}_amd64.deb"
 CTXUSB_PKG="ctxusb-gcc-8_${CITRIX_VERSION}_amd64.deb"
 VERSION_FILE=".distrobox-citrix-version"
+
+# The container shares $HOME with the host, so container Mesa and host Mesa
+# also share ~/.cache/mesa_shader_cache/index.  The index size is baked into
+# each Mesa build, so the container truncating that file to its own (smaller)
+# size leaves the running host Xwayland's mapping past EOF.  Xwayland's next
+# write into the truncated part raises SIGBUS, the X server dies, every X
+# client is hung up, and selfservice turns the resulting wfica exit code into
+# a bogus "EULA was rejected.".  Keeping container Mesa out of the shared
+# cache removes the conflict; see README "EULA was rejected."
+CITRIX_MESA_VARS="MESA_SHADER_CACHE_DISABLE=true MESA_GLSL_CACHE_DISABLE=true"
+
 ICACLIENT_URL=""
 CTXUSB_URL=""
 ICACLIENT_SHA256=""
@@ -379,6 +390,19 @@ distrobox-enter "$CONTAINER_NAME" -- bash -c "DEBIAN_FRONTEND=noninteractive sud
 distrobox-enter "$CONTAINER_NAME" -- bash -c "sudo apt --fix-broken install -y"
 print_success "Citrix packages installed."
 
+# Citrix's AAD SSO support stages SSO cookies through AuthManagerDaemon before
+# the gateway webview is opened.  Against a SAML NetScaler gateway that
+# corrupts the login flow: the assertion POST to /nf/auth/webview/done comes
+# back as HTTP 500 and SelfService reports a bogus "Http error" even though
+# the same store works in a browser and on Windows/macOS.  Turn it off.
+print_info "Disabling AAD SSO in the Citrix client config..."
+distrobox-enter "$CONTAINER_NAME" -- bash -c "
+    CFG='/opt/Citrix/ICAClient/config/AuthManConfig.xml'
+    sudo sed -i '/<key>AADSSOEnabled<\/key>/{n;s|<value>true</value>|<value>false</value>|}' \"\$CFG\"
+    grep -A1 '<key>AADSSOEnabled</key>' \"\$CFG\"
+"
+print_success "AAD SSO disabled."
+
 # Step 5: Wrap wfica to source environment file
 print_info "Step 5/7: Wrapping wfica to source environment file..."
 distrobox-enter "$CONTAINER_NAME" -- bash -c "
@@ -395,6 +419,15 @@ distrobox-enter "$CONTAINER_NAME" -- bash -c "
     sudo tee \"\$WFICA_PATH\" > /dev/null << 'WRAPPER'
 #!/bin/sh
 # wfica wrapper - sources environment file before executing original binary
+
+# Defaults that keep this container's Mesa out of the host's shared shader
+# cache.  A wrong-sized cache index makes the host Xwayland SIGBUS, and
+# selfservice then reports a bogus \"EULA was rejected.\" instead of the real
+# failure.  ~/.ICAClient/wfica.env is sourced below, so it can override these.
+MESA_SHADER_CACHE_DISABLE=true
+MESA_GLSL_CACHE_DISABLE=true
+export MESA_SHADER_CACHE_DISABLE MESA_GLSL_CACHE_DISABLE
+
 if [ -f \"\$HOME/.ICAClient/wfica.env\" ]; then
     . \"\$HOME/.ICAClient/wfica.env\"
 fi
@@ -414,7 +447,7 @@ distrobox-enter "$CONTAINER_NAME" -- bash -c "mkdir -p ~/.ICAClient && touch ~/.
 cat > citrix-workspace << EOF
 #!/bin/bash
 # Launch Citrix Workspace App
-distrobox-enter "${CONTAINER_NAME}" -- bash -c "export ICAROOT=/opt/Citrix/ICAClient && /opt/Citrix/ICAClient/selfservice"
+distrobox-enter "${CONTAINER_NAME}" -- bash -c "export ICAROOT=/opt/Citrix/ICAClient ${CITRIX_MESA_VARS} && /opt/Citrix/ICAClient/selfservice"
 EOF
 chmod +x citrix-workspace
 printf '%s\n' "$CITRIX_VERSION" > "$VERSION_FILE"
@@ -438,7 +471,7 @@ Version=1.0
 Type=Application
 Name=Citrix Workspace App ${CITRIX_VERSION}
 Comment=Citrix Workspace App in Distrobox container
-Exec=distrobox-enter ${CONTAINER_NAME} -- bash -c "ICAROOT=/opt/Citrix/ICAClient /opt/Citrix/ICAClient/selfservice"
+Exec=distrobox-enter ${CONTAINER_NAME} -- bash -c "ICAROOT=/opt/Citrix/ICAClient ${CITRIX_MESA_VARS} /opt/Citrix/ICAClient/selfservice"
 Icon=${ICON_PATH}
 Terminal=false
 Categories=Network;
