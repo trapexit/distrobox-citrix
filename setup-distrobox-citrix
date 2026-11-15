@@ -475,7 +475,7 @@ Exec=distrobox-enter ${CONTAINER_NAME} -- bash -c "ICAROOT=/opt/Citrix/ICAClient
 Icon=${ICON_PATH}
 Terminal=false
 Categories=Network;
-StartupWMClass=Citrix SelfService
+StartupWMClass=Selfservice
 EOF
 
 
